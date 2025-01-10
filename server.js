@@ -1,3 +1,5 @@
+// server.js
+
 require("dotenv").config();
 const express = require("express");
 const bodyParser = require("body-parser");
@@ -6,7 +8,6 @@ const csvParser = require("csv-parser");
 const mongoose = require("mongoose");
 const cors = require("cors");
 const fs = require("fs");
-const path = require("path");
 
 // Import the User model
 const User = require("./models/User");
@@ -14,7 +15,7 @@ const User = require("./models/User");
 const app = express();
 const PORT = process.env.PORT || 5500;
 
-// Import cron.js (if needed)
+// Import cron.js
 const cron = require("./cron"); // Adjust the path if necessary
 
 // MongoDB setup
@@ -49,61 +50,14 @@ app.use(cors());
 app.use(bodyParser.json());
 app.use(bodyParser.urlencoded({ extended: true }));
 
-// Storage configuration for multer
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => {
-    const chunkDir = path.join(__dirname, "uploads", "chunks");
-    if (!fs.existsSync(chunkDir)) {
-      fs.mkdirSync(chunkDir, { recursive: true });
-    }
-    cb(null, chunkDir);
-  },
-  filename: (req, file, cb) => {
-    cb(null, file.originalname); // Keep original chunk filename
-  },
-});
+const upload = multer({ dest: "uploads/" });
 
-const upload = multer({ storage });
-
-// Handle CSV chunk upload
-app.post("/upload", upload.single("csv"), (req, res) => {
-  const chunkFilePath = req.file.path;
-  const fileName = req.file.originalname;
-
-  // Save chunk to server and return a response once received
-  console.log(`Received chunk: ${fileName}`);
-  res.status(200).json({ message: "Chunk uploaded successfully" });
-});
-
-// Combine chunks and import tickets
-app.post("/import-chunks", async (req, res) => {
-  const chunkDir = path.join(__dirname, "uploads", "chunks");
-  const combinedFilePath = path.join(__dirname, "uploads", "combined.csv");
-
-  // Get all chunk files in the directory
-  const chunkFiles = fs.readdirSync(chunkDir).filter((file) => file.endsWith(".csv"));
-  
-  if (chunkFiles.length === 0) {
-    return res.status(400).json({ message: "No chunks to combine" });
-  }
-
-  // Combine all chunks into a single CSV file
-  const combinedStream = fs.createWriteStream(combinedFilePath);
-  for (const chunkFile of chunkFiles) {
-    const chunkPath = path.join(chunkDir, chunkFile);
-    const chunkStream = fs.createReadStream(chunkPath);
-    chunkStream.pipe(combinedStream, { end: false });
-
-    // Wait until current chunk is fully piped before processing next
-    await new Promise((resolve) => chunkStream.on("end", resolve));
-    fs.unlinkSync(chunkPath); // Clean up the chunk after processing
-  }
-  
-  combinedStream.end();
-
-  // Parse the combined CSV file
+// Import Tickets from CSV file
+app.post("/import", upload.single("file"), (req, res) => {
+  const filePath = req.file.path;
   const tickets = [];
-  fs.createReadStream(combinedFilePath)
+
+  fs.createReadStream(filePath)
     .pipe(csvParser())
     .on("data", (row) => {
       tickets.push({
@@ -117,9 +71,9 @@ app.post("/import-chunks", async (req, res) => {
     .on("end", async () => {
       try {
         await Ticket.insertMany(tickets);
-        fs.unlink(combinedFilePath, (err) => {
+        fs.unlink(filePath, (err) => {
           if (err) {
-            console.error("Error deleting the combined file:", err);
+            console.error("Error deleting the file:", err);
           }
         });
         res.status(200).json({ message: "Tickets imported successfully!" });
