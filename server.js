@@ -65,12 +65,13 @@ const insertTicketsInBatches = async (tickets) => {
   }
 };
 
-// Import Tickets from CSV file
-app.post("/import", upload, (req, res) => {
+const upload = multer({ dest: "uploads/" });
+
+// Import Tickets from CSV file (handling chunks)
+app.post("/import", upload.single("file"), (req, res) => {
   const filePath = req.file.path;
   const tickets = [];
 
-  // Parse the CSV file stream
   fs.createReadStream(filePath)
     .pipe(csvParser())
     .on("data", (row) => {
@@ -81,32 +82,21 @@ app.post("/import", upload, (req, res) => {
         barcode: row.barcode,
         table_no: parseInt(row.table_no, 10),
       });
-
-      // Insert tickets in batches if the batch size is reached
-      if (tickets.length >= 100) {
-        insertTicketsInBatches(tickets)
-          .then(() => {
-            tickets.length = 0; // Reset the tickets array for the next batch
-          })
-          .catch((error) => {
-            res.status(500).json({ message: "Error importing tickets", error });
-            fs.unlink(filePath, (err) => {
-              if (err) console.error("Error deleting the file:", err);
-            });
-          });
-      }
     })
     .on("end", async () => {
-      // Insert any remaining tickets if there are less than a batch of 100
-      if (tickets.length > 0) {
-        try {
-          await insertTicketsInBatches(tickets);
-          res.status(200).json({ message: "Tickets imported successfully!" });
-        } catch (error) {
-          res.status(500).json({ message: "Error importing tickets", error });
-        }
+      try {
+        await Ticket.insertMany(tickets); // Insert all tickets in the current chunk
+        fs.unlink(filePath, (err) => {
+          if (err) {
+            console.error("Error deleting the file:", err);
+          }
+        });
+        res.status(200).json({ message: "Tickets imported successfully!" });
+      } catch (error) {
+        res.status(500).json({ message: "Error importing tickets", error });
       }
-
+    });
+});
       // Clean up the uploaded file after processing
       fs.unlink(filePath, (err) => {
         if (err) console.error("Error deleting the file:", err);
