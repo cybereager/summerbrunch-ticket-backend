@@ -6,12 +6,16 @@ const csvParser = require("csv-parser");
 const mongoose = require("mongoose");
 const cors = require("cors");
 const fs = require("fs");
+const path = require("path");
 
 // Import the User model
 const User = require("./models/User");
 
 const app = express();
 const PORT = process.env.PORT || 5500;
+
+// Import cron.js (if needed)
+const cron = require("./cron"); // Adjust the path if necessary
 
 // MongoDB setup
 mongoose
@@ -45,34 +49,61 @@ app.use(cors());
 app.use(bodyParser.json());
 app.use(bodyParser.urlencoded({ extended: true }));
 
-// Multer setup for file upload
-const upload = multer({
-  dest: "uploads/",
-  limits: { fileSize: 10 * 1024 * 1024 }, // Max file size 10 MB
-}).single("file");
-
-// Helper function to insert tickets in batches
-const insertTicketsInBatches = async (tickets) => {
-  const batchSize = 100; // Batch size for insertion
-  while (tickets.length > 0) {
-    const batch = tickets.splice(0, batchSize);
-    try {
-      await Ticket.insertMany(batch);
-    } catch (error) {
-      console.error("Error inserting batch:", error);
-      throw error; // If insert fails, stop processing further
+// Storage configuration for multer
+const storage = multer.diskStorage({
+  destination: (req, file, cb) => {
+    const chunkDir = path.join(__dirname, "uploads", "chunks");
+    if (!fs.existsSync(chunkDir)) {
+      fs.mkdirSync(chunkDir, { recursive: true });
     }
+    cb(null, chunkDir);
+  },
+  filename: (req, file, cb) => {
+    cb(null, file.originalname); // Keep original chunk filename
+  },
+});
+
+const upload = multer({ storage });
+
+// Handle CSV chunk upload
+app.post("/upload", upload.single("csv"), (req, res) => {
+  const chunkFilePath = req.file.path;
+  const fileName = req.file.originalname;
+
+  // Save chunk to server and return a response once received
+  console.log(`Received chunk: ${fileName}`);
+  res.status(200).json({ message: "Chunk uploaded successfully" });
+});
+
+// Combine chunks and import tickets
+app.post("/import-chunks", async (req, res) => {
+  const chunkDir = path.join(__dirname, "uploads", "chunks");
+  const combinedFilePath = path.join(__dirname, "uploads", "combined.csv");
+
+  // Get all chunk files in the directory
+  const chunkFiles = fs.readdirSync(chunkDir).filter((file) => file.endsWith(".csv"));
+  
+  if (chunkFiles.length === 0) {
+    return res.status(400).json({ message: "No chunks to combine" });
   }
-};
 
-const upload = multer({ dest: "uploads/" });
+  // Combine all chunks into a single CSV file
+  const combinedStream = fs.createWriteStream(combinedFilePath);
+  for (const chunkFile of chunkFiles) {
+    const chunkPath = path.join(chunkDir, chunkFile);
+    const chunkStream = fs.createReadStream(chunkPath);
+    chunkStream.pipe(combinedStream, { end: false });
 
-// Import Tickets from CSV file (handling chunks)
-app.post("/import", upload.single("file"), (req, res) => {
-  const filePath = req.file.path;
+    // Wait until current chunk is fully piped before processing next
+    await new Promise((resolve) => chunkStream.on("end", resolve));
+    fs.unlinkSync(chunkPath); // Clean up the chunk after processing
+  }
+  
+  combinedStream.end();
+
+  // Parse the combined CSV file
   const tickets = [];
-
-  fs.createReadStream(filePath)
+  fs.createReadStream(combinedFilePath)
     .pipe(csvParser())
     .on("data", (row) => {
       tickets.push({
@@ -85,29 +116,16 @@ app.post("/import", upload.single("file"), (req, res) => {
     })
     .on("end", async () => {
       try {
-        await Ticket.insertMany(tickets); // Insert all tickets in the current chunk
-        fs.unlink(filePath, (err) => {
+        await Ticket.insertMany(tickets);
+        fs.unlink(combinedFilePath, (err) => {
           if (err) {
-            console.error("Error deleting the file:", err);
+            console.error("Error deleting the combined file:", err);
           }
         });
         res.status(200).json({ message: "Tickets imported successfully!" });
       } catch (error) {
         res.status(500).json({ message: "Error importing tickets", error });
       }
-    });
-});
-      // Clean up the uploaded file after processing
-      fs.unlink(filePath, (err) => {
-        if (err) console.error("Error deleting the file:", err);
-      });
-    })
-    .on("error", (error) => {
-      console.error("Error during CSV parsing:", error);
-      res.status(500).json({ message: "Error parsing CSV file", error });
-      fs.unlink(filePath, (err) => {
-        if (err) console.error("Error deleting the file:", err);
-      });
     });
 });
 
